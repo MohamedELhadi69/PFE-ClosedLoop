@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# PyCharm
+.idea/
+
+# Large data files — too heavy for GitHub
+*.csv
+*.pkl
+
+# Plots (optional — remove these lines if you want to keep them)
+*.png
