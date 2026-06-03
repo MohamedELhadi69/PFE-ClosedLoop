@@ -1,0 +1,56 @@
+\chapter{General Architecture}
+
+\section{Introduction}
+This chapter presents the general architecture of the implemented system and explains how each module contributes to telecom anomaly supervision and remediation. The proposed approach combines classical machine learning models with a local large language model pipeline in order to detect anomalies, analyze their characteristics, recommend operational actions, and assess the quality of the resulting decisions. The overall design follows a modular closed-loop logic in which predictive outputs are progressively refined into actionable remediation plans.
+
+\section{General Architecture}
+Our proposed approach is a sequential modular system that automates a full supervision process over 5G networks by observing the constantly updated \textit{KPIs}. The pipeline begins with data collection and ingestion, followed by anomaly detection. If an anomaly is detected, the system proceeds to anomaly analysis, where the anomaly type and its expected persistence are estimated. These analytical outputs are then combined with a reviewed remedy catalogue and a dataset-grounded case memory in order to support LLM-based decision making. Finally, the generated remediation plan is assessed through a performance evaluation stage, which closes the loop and helps measure the effectiveness of the overall architecture.
+
+\section{Data Preprocessing}
+
+We used an open source telecom observability dataset hosted on \textit{Huggingface} named TelecomTS\cite{telecomts2025}. It originates from a 5G testbed environment and is designed for tasks such as anomaly detection, forecasting, root-cause analysis, and time-series reasoning.
+
+TelecomTS contains 32,000 samples. Each sample represents a snapshot of 128 timesteps captured at a sampling rate of 10 samples per second, composed of multiple attributes such as \textit{Key Performance Indicators (KPIs)}, which are measurements of different network factors, and \textit{Statistics}, which summarize these indicators. The dataset also includes \textit{Start} and \textit{Finish Time} information, as well as the sampling rate to preserve sequencing within the data. In addition, the dataset contains anomaly annotations, natural language descriptions, and Q\&A pairs. Anomaly types vary from antenna failures to jamming and high network congestion.
+
+Despite its strengths, the dataset was gathered in an offline dataset-driven environment rather than a real-time network deployment. It is also not continuous, as it contains gaps in the observation timeline.
+
+In order to work effectively with the dataset, preprocessing was necessary. The first step consisted of improving label clarity for training purposes. We split the anomaly information into two separate targets: one binary column assigning 1 to anomalous samples and 0 to normal samples, and another containing the anomaly type or \textit{normal} for non-anomalous cases.
+
+Next, we transformed the statistical summaries into a tabular numerical representation. More precisely, we flattened the \textit{statistics} field by expanding each KPI summary into separate numerical columns, which generated the feature matrix used by the first two predictive models.
+
+The dataset is highly imbalanced, with only 1,235 anomalous samples. To preserve label distribution while supporting both predictive modeling and LLM recommendation, we used a stratified train--test split. The model-training subset was used both to train the predictive models and to construct a dataset-grounded memory of resolved anomaly cases, while the test subset was reserved for the final evaluation of the recommender on unseen rows.
+
+\section{Anomaly Detection}
+
+Once the data is prepared, the first step of the pipeline consists of detecting anomalies as they occur in the system. We trained a \textit{Random Forest} classifier to monitor the generated set of statistical telecom features and determine whether an anomaly occurred during a given snapshot.
+
+Because anomalous samples represent less than 4\% of the dataset, and become even rarer after splitting, the model could easily learn to predict \textit{normal} most of the time while still achieving deceptively high accuracy. To overcome this obstacle, we applied synthetic oversampling during training. Testing, however, was performed exclusively on untouched original samples in order to ensure fair evaluation.
+
+\textbf{SMOTE} (Synthetic Minority Oversampling Technique) is a method used to address class imbalance in datasets. Instead of duplicating minority class samples and risking overfitting, SMOTE identifies neighboring samples using the \textit{KNN} (K-Nearest Neighbors) algorithm, then creates new synthetic samples by interpolating between them. This process is repeated until the desired class balance is achieved.
+
+Despite its effectiveness, SMOTE has limitations. It may introduce noisy or ambiguous instances, especially when classes overlap, and can generate unrealistic samples if the minority class distribution is highly scattered. For that reason, it was applied only to the training subset of the binary anomaly detector.
+
+\section{Anomaly Analysis and Impact Assessment}
+
+If the first model detects an anomaly, the system proceeds to the second stage of the pipeline. We trained another \textit{Random Forest} classifier to categorize the detected anomaly into one of the telecom anomaly classes present in the dataset. Unlike the first model, this classifier was trained only on anomalous rows, since normal samples do not contribute to anomaly-type discrimination.
+
+However, anomaly type alone is not sufficient for operational decision making. In practice, operators also need an estimate of how persistent the anomaly is likely to be. For this reason, a third predictive component was added to estimate anomaly duration. This model was implemented as a persistence prediction module trained on anomalous windows only, using temporal and contextual features extracted from the KPI histories. It outputs a duration estimate that complements the anomaly type prediction and provides additional evidence for downstream decision making.
+
+Together, the outputs of the second and third models form the anomaly analysis block. This stage therefore not only identifies the nature of the anomaly, but also provides an indication of its expected persistence and potential impact on network operations.
+
+\section{Decision making}
+The final analytical outputs are passed to a local LLM-based recommendation stage. In the implemented version, this stage relies on a single dataset-grounded LLM recommender. The remedy catalogue is built from remediation knowledge already present in the dataset, while the memory component stores past resolved cases in a structured format aligned with the outputs of the predictive models.
+
+At inference time, the deployed LLM does not receive the original \textit{description} or \textit{Q\&A} fields. Instead, it relies on the outputs of the three predictive models, contextual metadata, the remedy catalogue, and retrieved similar cases from the dataset-grounded memory. The model then produces a structured decision containing severity, urgency, selected remedies, prevention measures, verification steps, and concise operational explanations.
+
+This design allows the decision module to imitate teacher-level reasoning while remaining compatible with test-time conditions where rich explanatory fields are unavailable.
+
+\section{Performance assessment}
+Performance assessment was carried out at multiple levels of the architecture. The first model was evaluated as a binary anomaly detector using standard classification metrics such as precision, recall, F1-score, confusion matrices, and ROC-AUC. The second model was evaluated only on anomalous test samples, since its role is anomaly categorization rather than binary detection.
+
+The third model was assessed using duration-oriented metrics, including exact prediction accuracy, tolerance-based accuracy within a small number of timesteps, and regression-based error measures such as the mean absolute error. In addition, duration regimes were compared to determine whether the model correctly distinguished between short, partial, or sustained anomaly persistence patterns.
+
+Finally, the student LLM recommender was evaluated on unseen test rows by comparing its structured outputs against teacher-generated reference decisions. This evaluation considered exact agreement, action-selection similarity, severity and urgency alignment, and overall pipeline reliability. In this way, performance assessment was not limited to anomaly prediction accuracy alone, but extended to the quality and consistency of the final remediation recommendations.
+
+\section{Conclusion}
+This chapter presented the implemented general architecture of the proposed telecom supervision and remediation system. Starting from telecom observability data, the system progressively transforms structured signals into anomaly decisions, analytical characterizations, and finally operational remediation plans. The combination of three predictive models with a dataset-grounded LLM recommendation stage forms the core of the implementation and provides a practical basis for closed-loop anomaly management in 5G environments.

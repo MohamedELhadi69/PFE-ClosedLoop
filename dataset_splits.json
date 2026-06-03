@@ -1,0 +1,15 @@
+{
+  "random_seed": 42,
+  "ratios": {
+    "model_train": 0.8,
+    "test": 0.2
+  },
+  "counts": {
+    "model_train": 25600,
+    "test": 6400
+  },
+  "index_files": {
+    "model_train": "row_indices_model_train.csv",
+    "test": "row_indices_test.csv"
+  }
+}

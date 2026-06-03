@@ -1,0 +1,27 @@
+{
+  "teacher_total_rows": 6400,
+  "teacher_ok_rows": 6400,
+  "teacher_error_rows": 0,
+  "student_total_rows": 6400,
+  "student_ok_rows": 6400,
+  "student_error_rows": 0,
+  "common_ok_rows": 6400,
+  "pipeline_success_rate_vs_teacher": 1.0,
+  "mean_plan_score_on_common_ok_rows": 0.7517188748670464,
+  "system_score": 0.7517188748670464,
+  "anomaly_only": {
+    "rows": 247,
+    "plan_score": 0.7517188748670464,
+    "full_plan_exact": 0.004048582995951417,
+    "remedy_f1": 0.9149797570850202,
+    "prevention_f1": 0.9149797570850202,
+    "verification_f1": 0.9149797570850202,
+    "severity_exact": 0.5668016194331984,
+    "urgency_exact": 0.6680161943319838,
+    "summary_token_f1": 0.5900540972707359,
+    "root_cause_token_f1": 0.6399957796559802,
+    "impact_token_f1": 0.5960934171392598
+  },
+  "anomaly_rows_scored": 247,
+  "normal_rows_excluded": 6153
+}

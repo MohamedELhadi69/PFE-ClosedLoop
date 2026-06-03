@@ -1,8 +1,16 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from runtime_bootstrap import ensure_repo_python
+
+ensure_repo_python()
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from collections import Counter
-from pathlib import Path
 from data_utils import load_or_fetch_dataframe, parse_col
 pd.set_option('display.max_columns', None)
 OUTPUT_DIR = Path('graphs_output')

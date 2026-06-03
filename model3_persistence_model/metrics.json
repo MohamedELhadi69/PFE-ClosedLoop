@@ -1,0 +1,42 @@
+{
+  "selected_model": "hybrid_boundary_forest",
+  "input_size": 96,
+  "horizon": 32,
+  "random_seed": 42,
+  "train_windows": 761,
+  "valid_windows": 227,
+  "test_windows": 247,
+  "train_sessions": 61,
+  "valid_sessions": 24,
+  "test_sessions": 70,
+  "kpi_columns": [
+    "RSRP",
+    "DL_BLER",
+    "DL_MCS",
+    "UL_BLER",
+    "UL_MCS",
+    "UL_NPRB",
+    "UL_SNR",
+    "TX_Bytes",
+    "RX_Bytes",
+    "Estimated_UL_Buffer",
+    "PRBs_DL_Current",
+    "PRBs_UL_Current",
+    "PRB_Utilization_DL",
+    "PRB_Utilization_UL",
+    "UL_NumberOfPackets",
+    "DL_NumberOfPackets"
+  ],
+  "numeric_feature_count": 177,
+  "categorical_feature_count": 5,
+  "selected_model_metrics": {
+    "exact_match": 0.8259109311740891,
+    "within_1": 0.8299595141700404,
+    "within_2": 0.8299595141700404,
+    "within_4": 0.8340080971659919,
+    "mae": 3.672064777327935,
+    "rmse": 9.723505474079472,
+    "regime_accuracy": 0.8421052631578947,
+    "regime_macro_f1": 0.6624946149421674
+  }
+}

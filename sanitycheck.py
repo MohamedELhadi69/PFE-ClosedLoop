@@ -1,3 +1,16 @@
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+LOCAL_PYTHON_PACKAGES = Path(__file__).with_name(".python_packages")
+if LOCAL_PYTHON_PACKAGES.exists():
+    sys.path.insert(0, str(LOCAL_PYTHON_PACKAGES))
+
+from runtime_bootstrap import ensure_repo_python
+
+ensure_repo_python()
+
 import joblib
 import pandas as pd
 from sklearn.metrics import classification_report, roc_auc_score

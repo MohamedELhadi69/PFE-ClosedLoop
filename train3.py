@@ -1,5 +1,17 @@
-import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+LOCAL_PYTHON_PACKAGES = Path(__file__).with_name(".python_packages")
+if LOCAL_PYTHON_PACKAGES.exists():
+    sys.path.insert(0, str(LOCAL_PYTHON_PACKAGES))
+
+from runtime_bootstrap import ensure_repo_python
+
+ensure_repo_python()
+
+import json
 
 import joblib
 import numpy as np
@@ -17,6 +29,7 @@ from sklearn.metrics import (
 )
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
+from split_utils import MODEL_TRAIN_SPLIT_NAME, TEST_SPLIT_NAME, load_split_row_indices
 
 
 DATA_CSV = Path("data.csv")
@@ -73,6 +86,37 @@ def is_numeric_series(values):
     )
 
 
+def build_observable_persistence_features(kpis, labels, anomaly_type, sampling_rate, kpi_columns):
+    record = {
+        "anomaly_type": anomaly_type or "unknown",
+        "zone": labels.get("zone", "unknown"),
+        "application": labels.get("application", "unknown"),
+        "mobility": labels.get("mobility", "unknown"),
+        "congestion": labels.get("congestion", "unknown"),
+        "sampling_rate": float(sampling_rate),
+    }
+
+    for kpi_name in kpi_columns:
+        series = kpis.get(kpi_name)
+        if not is_numeric_series(series):
+            raise ValueError(f"KPI '{kpi_name}' is missing or invalid for persistence features.")
+
+        history = np.array(series[:INPUT_SIZE], dtype=np.float32)
+        record[f"{kpi_name}__mean"] = float(history.mean())
+        record[f"{kpi_name}__std"] = float(history.std())
+        record[f"{kpi_name}__min"] = float(history.min())
+        record[f"{kpi_name}__max"] = float(history.max())
+        record[f"{kpi_name}__start"] = float(history[0])
+        record[f"{kpi_name}__end"] = float(history[-1])
+        record[f"{kpi_name}__delta"] = float(history[-1] - history[0])
+        record[f"{kpi_name}__trend"] = float((history[-1] - history[0]) / max(len(history) - 1, 1))
+        record[f"{kpi_name}__last8_mean"] = float(history[-8:].mean())
+        record[f"{kpi_name}__last16_mean"] = float(history[-16:].mean())
+        record[f"{kpi_name}__last32_mean"] = float(history[-32:].mean())
+
+    return record
+
+
 def trailing_run(values, target_value):
     count = 0
     for value in values[::-1]:
@@ -113,7 +157,7 @@ def select_tail_sessions(session_summary, target_windows):
     return set(selected)
 
 
-def split_by_session(feature_df, valid_ratio, test_ratio):
+def split_train_valid_by_session(feature_df, valid_ratio):
     session_summary = (
         feature_df.groupby("session_id")
         .agg(
@@ -125,21 +169,31 @@ def split_by_session(feature_df, valid_ratio, test_ratio):
         .reset_index()
     )
 
-    test_target = max(1, int(round(len(feature_df) * test_ratio)))
-    test_sessions = select_tail_sessions(session_summary, test_target)
-
-    remaining_summary = session_summary[~session_summary["session_id"].isin(test_sessions)].copy()
-    remaining_df = feature_df[~feature_df["session_id"].isin(test_sessions)].copy()
-    valid_target = max(1, int(round(len(remaining_df) * valid_ratio)))
-    valid_sessions = select_tail_sessions(remaining_summary, valid_target)
-
-    train_sessions = set(session_summary["session_id"]) - test_sessions - valid_sessions
-    if not train_sessions or not valid_sessions or not test_sessions:
-        raise ValueError("Session split failed to produce train/valid/test partitions.")
+    valid_target = max(1, int(round(len(feature_df) * valid_ratio)))
+    valid_sessions = select_tail_sessions(session_summary, valid_target)
+    train_sessions = set(session_summary["session_id"]) - valid_sessions
+    if not train_sessions or not valid_sessions:
+        raise ValueError("Session split failed to produce train/valid partitions.")
 
     train_df = feature_df[feature_df["session_id"].isin(train_sessions)].copy()
     valid_df = feature_df[feature_df["session_id"].isin(valid_sessions)].copy()
-    test_df = feature_df[feature_df["session_id"].isin(test_sessions)].copy()
+    return train_df, valid_df, session_summary
+
+
+def split_by_dataset_partitions(feature_df, valid_ratio):
+    model_train_indices = set(load_split_row_indices(MODEL_TRAIN_SPLIT_NAME))
+    test_indices = set(load_split_row_indices(TEST_SPLIT_NAME))
+    if not model_train_indices or not test_indices:
+        raise ValueError(
+            "Missing dataset split manifests. Run DataPrep.py before training the persistence model."
+        )
+
+    model_train_df = feature_df[feature_df["source_row_index"].isin(model_train_indices)].copy()
+    test_df = feature_df[feature_df["source_row_index"].isin(test_indices)].copy()
+    if model_train_df.empty or test_df.empty:
+        raise ValueError("Could not map persistence rows onto the saved dataset train/test split.")
+
+    train_df, valid_df, session_summary = split_train_valid_by_session(model_train_df, valid_ratio)
     return train_df, valid_df, test_df, session_summary
 
 
@@ -149,6 +203,7 @@ def build_feature_table(df):
     kpi_columns = [name for name, values in first_kpis.items() if is_numeric_series(values)]
 
     anomalous_df = df[df["anomalies"].apply(lambda x: bool(x and x.get("exists")))].copy()
+    anomalous_df["source_row_index"] = anomalous_df.index.astype(int)
     anomalous_df = anomalous_df.reset_index(drop=True)
     anomalous_df["row_id"] = anomalous_df.index.astype(int)
     anomalous_df["start_time"] = pd.to_datetime(anomalous_df["start_time"], errors="coerce")
@@ -159,14 +214,12 @@ def build_feature_table(df):
         labels = row.labels
         anomaly = row.anomalies
         anomaly_mask = build_anomaly_mask(anomaly)
-        history_mask = anomaly_mask[:INPUT_SIZE]
         future_mask = anomaly_mask[INPUT_SIZE:]
-        affected_kpis = anomaly.get("affected_kpis")
-        affected_set = set(affected_kpis.tolist()) if hasattr(affected_kpis, "tolist") else set(affected_kpis or [])
 
         record = {
             "unique_id": f"anom_{int(row.row_id)}",
             "row_id": int(row.row_id),
+            "source_row_index": int(row.source_row_index),
             "session_id": int(row.session_id),
             "start_time": row.start_time,
             "end_time": row.end_time,
@@ -176,39 +229,17 @@ def build_feature_table(df):
             "mobility": labels.get("mobility", "unknown"),
             "congestion": labels.get("congestion", "unknown"),
             "sampling_rate": float(row.sampling_rate),
-            "affected_kpi_count": float(len(affected_set)),
-            "history_sum": float(history_mask.sum()),
-            "history_mean": float(history_mask.mean()),
-            "history_last_active": int(history_mask[-1]),
-            "history_last8_sum": float(history_mask[-8:].sum()),
-            "history_last16_sum": float(history_mask[-16:].sum()),
-            "history_last32_sum": float(history_mask[-32:].sum()),
-            "history_trailing_ones": float(trailing_run(history_mask, 1)),
-            "history_trailing_zeros": float(trailing_run(history_mask, 0)),
-            "history_leading_ones": float(leading_run(history_mask, 1)),
-            "history_first_active_idx": float(np.argmax(history_mask) if history_mask.sum() else -1),
-            "history_last_active_idx": float(
-                INPUT_SIZE - 1 - np.argmax(history_mask[::-1]) if history_mask.sum() else -1
-            ),
-            "history_transition_count": float(np.abs(np.diff(history_mask)).sum()),
             "future_count": int(future_mask.sum()),
         }
-
-        for kpi_name in kpi_columns:
-            series = np.array(row.KPIs[kpi_name], dtype=np.float32)
-            history = series[:INPUT_SIZE]
-            record[f"{kpi_name}__mean"] = float(history.mean())
-            record[f"{kpi_name}__std"] = float(history.std())
-            record[f"{kpi_name}__min"] = float(history.min())
-            record[f"{kpi_name}__max"] = float(history.max())
-            record[f"{kpi_name}__start"] = float(history[0])
-            record[f"{kpi_name}__end"] = float(history[-1])
-            record[f"{kpi_name}__delta"] = float(history[-1] - history[0])
-            record[f"{kpi_name}__trend"] = float((history[-1] - history[0]) / max(len(history) - 1, 1))
-            record[f"{kpi_name}__last8_mean"] = float(history[-8:].mean())
-            record[f"{kpi_name}__last16_mean"] = float(history[-16:].mean())
-            record[f"{kpi_name}__last32_mean"] = float(history[-32:].mean())
-            record[f"affected_{kpi_name}"] = float(kpi_name in affected_set)
+        record.update(
+            build_observable_persistence_features(
+                row.KPIs,
+                labels,
+                anomaly.get("type", "unknown"),
+                row.sampling_rate,
+                kpi_columns,
+            )
+        )
 
         records.append(record)
 
@@ -274,10 +305,11 @@ def print_target_distribution(name, df):
 
 class HeuristicBoundaryModel:
     def fit(self, X, y):
+        self.default_prediction = int(np.rint(np.median(y))) if len(y) else HORIZON // 2
         return self
 
     def predict(self, X):
-        return np.where(X["history_last_active"].to_numpy() >= 0.5, HORIZON, 0).astype(int)
+        return np.full(len(X), self.default_prediction, dtype=int)
 
 
 class ExactCountForestModel:
@@ -416,12 +448,21 @@ def main():
 
     print("Building persistence feature table...")
     feature_df, kpi_columns = build_feature_table(df)
-    train_df, valid_df, test_df, session_summary = split_by_session(feature_df, VALID_RATIO, TEST_RATIO)
+    train_df, valid_df, test_df, session_summary = split_by_dataset_partitions(feature_df, VALID_RATIO)
 
     feature_columns = [
         column
         for column in feature_df.columns
-        if column not in {"unique_id", "row_id", "session_id", "start_time", "end_time", "future_count"}
+        if column
+        not in {
+            "unique_id",
+            "row_id",
+            "source_row_index",
+            "session_id",
+            "start_time",
+            "end_time",
+            "future_count",
+        }
     ]
     categorical_features = ["anomaly_type", "zone", "application", "mobility", "congestion"]
     numeric_features = [column for column in feature_columns if column not in categorical_features]
@@ -432,6 +473,9 @@ def main():
     print(
         f"Session time span          : "
         f"{session_summary['session_start'].min()} -> {session_summary['session_end'].max()}"
+    )
+    print(
+        f"Dataset split strategy     : {MODEL_TRAIN_SPLIT_NAME} train/valid + {TEST_SPLIT_NAME} test"
     )
     print_target_distribution("Train", train_df)
     print_target_distribution("Valid", valid_df)
@@ -511,7 +555,16 @@ def main():
     print(regime_matrix_df.to_string())
 
     predictions_df = test_df[
-        ["unique_id", "row_id", "session_id", "anomaly_type", "zone", "application", "history_sum", "future_count"]
+        [
+            "unique_id",
+            "row_id",
+            "source_row_index",
+            "session_id",
+            "anomaly_type",
+            "zone",
+            "application",
+            "future_count",
+        ]
     ].copy()
     predictions_df["predicted_future_count"] = selected_predictions.astype(int)
     predictions_df["abs_error"] = (predictions_df["future_count"] - predictions_df["predicted_future_count"]).abs()

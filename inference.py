@@ -1,6 +1,18 @@
-import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+LOCAL_PYTHON_PACKAGES = Path(__file__).with_name(".python_packages")
+if LOCAL_PYTHON_PACKAGES.exists():
+    sys.path.insert(0, str(LOCAL_PYTHON_PACKAGES))
+
+from runtime_bootstrap import ensure_repo_python
+
+ensure_repo_python()
+
 import __main__
+import json
 
 import joblib
 import numpy as np
@@ -10,6 +22,8 @@ import train3
 from data_utils import load_or_fetch_dataframe, parse_col
 
 
+MODEL1_PATH = Path("model1_binary.pkl")
+MODEL2_PATH = Path("model2_type.pkl")
 MODEL3_DIR = Path("model3_persistence_model")
 MODEL3_PATH = MODEL3_DIR / "model.joblib"
 MODEL3_METADATA_PATH = MODEL3_DIR / "metrics.json"
@@ -20,10 +34,33 @@ __main__.HeuristicBoundaryModel = train3.HeuristicBoundaryModel
 __main__.ExactCountForestModel = train3.ExactCountForestModel
 __main__.HybridPersistenceModel = train3.HybridPersistenceModel
 
-model1 = joblib.load("model1_binary.pkl")
-model2 = joblib.load("model2_type.pkl")
-model3 = joblib.load(MODEL3_PATH) if MODEL3_PATH.exists() else None
-model3_metadata = json.loads(MODEL3_METADATA_PATH.read_text()) if MODEL3_METADATA_PATH.exists() else {}
+_MODELS_CACHE = None
+
+
+def _load_required_pickle(path, label):
+    if not path.exists():
+        raise FileNotFoundError(f"{path.name} is missing. Train {label} before running inference.")
+    return joblib.load(path)
+
+
+def get_loaded_models():
+    global _MODELS_CACHE
+
+    if _MODELS_CACHE is None:
+        model3 = joblib.load(MODEL3_PATH) if MODEL3_PATH.exists() else None
+        model3_metadata = (
+            json.loads(MODEL3_METADATA_PATH.read_text())
+            if MODEL3_METADATA_PATH.exists()
+            else {}
+        )
+        _MODELS_CACHE = {
+            "model1": _load_required_pickle(MODEL1_PATH, "model 1"),
+            "model2": _load_required_pickle(MODEL2_PATH, "model 2"),
+            "model3": model3,
+            "model3_metadata": model3_metadata,
+        }
+
+    return _MODELS_CACHE
 
 
 def build_stage1_features(stats_dict):
@@ -59,7 +96,10 @@ def extract_statistics(sample):
 
 
 def build_stage3_features(sample, predicted_type):
-    if model3 is None:
+    models = get_loaded_models()
+    model3_metadata = models["model3_metadata"]
+
+    if models["model3"] is None:
         return None, "model3 artifact not found"
 
     kpis = sample.get("KPIs")
@@ -67,70 +107,27 @@ def build_stage3_features(sample, predicted_type):
     if not isinstance(kpis, dict) or not isinstance(labels, dict):
         return None, "KPIs and labels are required for model 3 inference"
 
-    anomaly_info = sample.get("anomalies")
-    anomaly_mask = train3.build_anomaly_mask(anomaly_info) if anomaly_info else np.zeros(
-        train3.INPUT_SIZE + train3.HORIZON, dtype=np.float32
-    )
-    history_mask = anomaly_mask[: train3.INPUT_SIZE]
-
     selected_kpis = model3_metadata.get("kpi_columns") or [
         name for name, values in kpis.items() if train3.is_numeric_series(values)
     ]
-    affected_kpis = anomaly_info.get("affected_kpis") if anomaly_info else []
-    affected_set = set(affected_kpis.tolist()) if hasattr(affected_kpis, "tolist") else set(affected_kpis or [])
-
-    record = {
-        "anomaly_type": predicted_type,
-        "zone": labels.get("zone", "unknown"),
-        "application": labels.get("application", "unknown"),
-        "mobility": labels.get("mobility", "unknown"),
-        "congestion": labels.get("congestion", "unknown"),
-        "sampling_rate": float(sample.get("sampling_rate", 0.0) or 0.0),
-        "affected_kpi_count": float(len(affected_set)),
-        "history_sum": float(history_mask.sum()),
-        "history_mean": float(history_mask.mean()),
-        "history_last_active": int(history_mask[-1]),
-        "history_last8_sum": float(history_mask[-8:].sum()),
-        "history_last16_sum": float(history_mask[-16:].sum()),
-        "history_last32_sum": float(history_mask[-32:].sum()),
-        "history_trailing_ones": float(train3.trailing_run(history_mask, 1)),
-        "history_trailing_zeros": float(train3.trailing_run(history_mask, 0)),
-        "history_leading_ones": float(train3.leading_run(history_mask, 1)),
-        "history_first_active_idx": float(np.argmax(history_mask) if history_mask.sum() else -1),
-        "history_last_active_idx": float(
-            train3.INPUT_SIZE - 1 - np.argmax(history_mask[::-1]) if history_mask.sum() else -1
-        ),
-        "history_transition_count": float(np.abs(np.diff(history_mask)).sum()),
-    }
-
-    for kpi_name in selected_kpis:
-        series = kpis.get(kpi_name)
-        if not train3.is_numeric_series(series):
-            raise ValueError(f"KPI '{kpi_name}' is missing or invalid for model 3 inference.")
-
-        history = np.array(series[: train3.INPUT_SIZE], dtype=np.float32)
-        record[f"{kpi_name}__mean"] = float(history.mean())
-        record[f"{kpi_name}__std"] = float(history.std())
-        record[f"{kpi_name}__min"] = float(history.min())
-        record[f"{kpi_name}__max"] = float(history.max())
-        record[f"{kpi_name}__start"] = float(history[0])
-        record[f"{kpi_name}__end"] = float(history[-1])
-        record[f"{kpi_name}__delta"] = float(history[-1] - history[0])
-        record[f"{kpi_name}__trend"] = float((history[-1] - history[0]) / max(len(history) - 1, 1))
-        record[f"{kpi_name}__last8_mean"] = float(history[-8:].mean())
-        record[f"{kpi_name}__last16_mean"] = float(history[-16:].mean())
-        record[f"{kpi_name}__last32_mean"] = float(history[-32:].mean())
-        record[f"affected_{kpi_name}"] = float(kpi_name in affected_set)
+    record = train3.build_observable_persistence_features(
+        kpis,
+        labels,
+        predicted_type,
+        float(sample.get("sampling_rate", 0.0) or 0.0),
+        selected_kpis,
+    )
 
     return pd.DataFrame([record]), None
 
 
 def predict(sample):
+    models = get_loaded_models()
     sample = normalize_sample(sample)
     stats_dict = extract_statistics(sample)
     X_stage1 = build_stage1_features(stats_dict)
 
-    anomaly_prob = float(model1.predict_proba(X_stage1)[0][1])
+    anomaly_prob = float(models["model1"].predict_proba(X_stage1)[0][1])
     is_anomaly = anomaly_prob >= 0.5
 
     result = {
@@ -141,15 +138,15 @@ def predict(sample):
         "type_distribution": None,
         "duration_steps": None,
         "duration_regime": None,
-        "duration_model": model3_metadata.get("selected_model"),
+        "duration_model": models["model3_metadata"].get("selected_model"),
         "duration_ready": False,
     }
 
     if not is_anomaly:
         return result
 
-    anomaly_type = model2.predict(X_stage1)[0]
-    type_probs = dict(zip(model2.classes_, model2.predict_proba(X_stage1)[0]))
+    anomaly_type = models["model2"].predict(X_stage1)[0]
+    type_probs = dict(zip(models["model2"].classes_, models["model2"].predict_proba(X_stage1)[0]))
     top_prob = max(type_probs.values())
 
     result["type"] = anomaly_type
@@ -164,7 +161,7 @@ def predict(sample):
         result["duration_reason"] = stage3_error
         return result
 
-    duration_steps = int(model3.predict(X_stage3)[0])
+    duration_steps = int(models["model3"].predict(X_stage3)[0])
     result["duration_steps"] = duration_steps
     result["duration_regime"] = train3.count_to_regime(duration_steps)
     result["duration_ready"] = True
@@ -182,6 +179,7 @@ def safe_divide(numerator, denominator):
 
 
 def run_pipeline_test():
+    models = get_loaded_models()
     df = load_or_fetch_dataframe()
 
     df["stats_parsed"] = df["statistics"].apply(parse_col)
@@ -204,7 +202,7 @@ def run_pipeline_test():
     print(f"Total rows           : {total_rows}")
     print(f"Normal rows          : {total_normals}")
     print(f"Anomaly rows         : {total_anomalies}")
-    print(f"Model 3 selected     : {model3_metadata.get('selected_model', 'missing')}")
+    print(f"Model 3 selected     : {models['model3_metadata'].get('selected_model', 'missing')}")
 
     stage1_correct = 0
     stage2_total = 0
